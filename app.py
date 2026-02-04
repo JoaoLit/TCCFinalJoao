@@ -254,22 +254,54 @@ def calcular_investimento_por_mes(_df_raw, _df_mrp, mes_especifico):
     df_mes_historico['CUSTO_UNITARIO'] = df_mes_historico['CUSTO'] / df_mes_historico['QUANTIDADE']
     df_mes_historico = df_mes_historico[df_mes_historico['CUSTO_UNITARIO'] > 0]
     
-    # Agrupar por item para calcular custo unitário médio daquele mês
-    df_investimento_mes = df_mes_historico.groupby('ITEM').agg(
-        CUSTO_UNITARIO_MEDIO=('CUSTO_UNITARIO', 'mean'),
-        QTD_VENDIDA_MES=('QUANTIDADE', 'sum')
+    # Calcular demanda média e desvio padrão ESPECÍFICO daquele mês
+    # Agrupa por ITEM e ANO para pegar vendas anuais daquele mês
+    df_mes_por_ano = df_mes_historico.groupby(['ITEM', 'ANO']).agg(
+        QUANTIDADE_ANO=('QUANTIDADE', 'sum'),
+        CUSTO_UNITARIO=('CUSTO_UNITARIO', 'mean')
     ).reset_index()
     
-    # Merge com MRP para pegar a sugestão de compra e desvio padrao
+    # Agora calcula a média e desvio padrão daquele mês específico
+    df_investimento_mes = df_mes_por_ano.groupby('ITEM').agg(
+        DEMANDA_MEDIA_MES_ESPECIFICO=('QUANTIDADE_ANO', 'mean'),
+        DESVIO_PADRAO_MES_ESPECIFICO=('QUANTIDADE_ANO', 'std'),
+        CUSTO_UNITARIO_MEDIO=('CUSTO_UNITARIO', 'mean')
+    ).reset_index()
+    
+    df_investimento_mes['DESVIO_PADRAO_MES_ESPECIFICO'] = df_investimento_mes['DESVIO_PADRAO_MES_ESPECIFICO'].fillna(0)
+    
+    # Recalcular estoque de segurança com base no desvio padrão do mês específico
+    from scipy.stats import norm
+    z_score = norm.ppf(nivel_servico / 100)
+    df_investimento_mes['ESTOQUE_SEGURANCA_MES'] = (
+        z_score * df_investimento_mes['DESVIO_PADRAO_MES_ESPECIFICO'] * 
+        np.sqrt(lead_time_dias / 30)
+    ).clip(lower=0)
+    
+    # Sugestão de compra específica do mês
+    df_investimento_mes['SUGESTAO_COMPRA_MES'] = (
+        df_investimento_mes['DEMANDA_MEDIA_MES_ESPECIFICO'] + 
+        df_investimento_mes['ESTOQUE_SEGURANCA_MES']
+    ).round(0)
+    
+    # Merge com MRP apenas para pegar o GRUPO
     df_resultado = pd.merge(
-        df_mrp[['ITEM', 'GRUPO', 'DEMANDA_MEDIA_MENSAL', 'DESVIO_PADRAO', 'ESTOQUE_SEGURANCA', 'SUGESTAO_COMPRA']], 
-        df_investimento_mes[['ITEM', 'CUSTO_UNITARIO_MEDIO']], 
+        df_investimento_mes, 
+        df_mrp[['ITEM', 'GRUPO']], 
         on='ITEM', 
-        how='inner'  # Inner join para pegar apenas produtos vendidos nesse mês
+        how='inner'
     )
     
-    df_resultado['INVESTIMENTO_ESTIMADO'] = df_resultado['SUGESTAO_COMPRA'] * df_resultado['CUSTO_UNITARIO_MEDIO']
-    df_resultado = df_resultado.rename(columns={'CUSTO_UNITARIO_MEDIO': 'CUSTO'})
+    # Renomear colunas para compatibilidade com o resto do código
+    df_resultado = df_resultado.rename(columns={
+        'DEMANDA_MEDIA_MES_ESPECIFICO': 'DEMANDA_MEDIA_MENSAL',
+        'DESVIO_PADRAO_MES_ESPECIFICO': 'DESVIO_PADRAO',
+        'ESTOQUE_SEGURANCA_MES': 'ESTOQUE_SEGURANCA',
+        'SUGESTAO_COMPRA_MES': 'SUGESTAO_COMPRA',
+        'CUSTO_UNITARIO_MEDIO': 'CUSTO'
+    })
+    
+    df_resultado['INVESTIMENTO_ESTIMADO'] = df_resultado['SUGESTAO_COMPRA'] * df_resultado['CUSTO']
     
     return df_resultado
 
